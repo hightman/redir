@@ -60,6 +60,7 @@ int   target_port = 0;
 char *local_addr  = NULL;
 int   local_port  = 0;
 char *bind_addr   = NULL;
+char *capture_file = NULL;
 
 #ifndef NO_FTP
 int ftp = 0;
@@ -142,6 +143,7 @@ static int usage(int code)
 		"Options:\n"
 		" -b, --bind=IP            Force specific IP to bind() to when listening for\n"
 		"                          incoming connections.  Not applicable with -p\n"
+		" -c, --capture=FILE       Capture sent and received data and save to FILE\n"
 #ifndef NO_FTP
 		" -f, --ftp=TYPE           Redirect FTP connections.  Where type is\n"
 		"                          one of: 'port', 'pasv', or 'both'\n"
@@ -246,6 +248,7 @@ static void parse_args(int argc, char *argv[])
 		{"help",          no_argument,       0, 'h'},
 		{"bind_addr",     required_argument, 0, 'b'},
 		{"bind",          required_argument, 0, 'b'},
+		{"capture",       required_argument, 0, 'c'},
 		{"timeout",       required_argument, 0, 't'},
 		{"inetd",         no_argument,       0, 'i'},
 		{"ident",         required_argument, 0, 'I'},
@@ -292,10 +295,14 @@ static void parse_args(int argc, char *argv[])
 #define SHAPER_OPTS ""
 #endif
 	prognm = progname(argv[0]);
-	while ((opt = getopt_long(argc, argv, "b:hiI:l:npst:vx:" FTP_OPTS SHAPER_OPTS, long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "b:c:hiI:l:npst:vx:" FTP_OPTS SHAPER_OPTS, long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'b':
 			bind_addr = optarg;
+			break;
+
+        case 'c':
+			capture_file = optarg;
 			break;
 
 #ifndef NO_FTP
@@ -571,6 +578,64 @@ void ftp_clean(int send, char *buf, ssize_t *bytes, int ftpsrv)
 }
 #endif
 
+static FILE *_capture_fp = NULL;
+static char *_peer_addr = NULL;
+static int _peer_port = 0;
+
+static inline void capture_newline(int in)
+{
+	time_t now;
+	struct tm tm;
+
+	time(&now);
+	localtime_r(&now, &tm);
+	fprintf(_capture_fp, "%d-%02d-%02d %02d:%02d:%02d %s:%d%c%c%d",
+		tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
+		_peer_addr, _peer_port, in == REDIR_IN ? '-' : '<', in == REDIR_IN ? '>' : '-', local_port);
+}
+
+static void capture_open(int insock)
+{
+	struct sockaddr_in peer;
+	socklen_t peerlen = sizeof(peer);
+
+	if (!getpeername(insock, (struct sockaddr *)&peer, &peerlen)) {
+		_peer_addr = strdup(inet_ntoa(peer.sin_addr));
+		_peer_port = ntohs(peer.sin_port);
+	}
+
+	_capture_fp = fopen(capture_file, "a");
+	if (_capture_fp == NULL) {
+		syslog(LOG_ERR, "Failed opening catpure file: %s", strerror(errno));
+	} else {
+		capture_newline(REDIR_IN);
+		fprintf(_capture_fp, " opened\n");
+	}
+}
+
+static void capture_close()
+{
+	if (_capture_fp != NULL) {
+		capture_newline(REDIR_OUT);
+		fprintf(_capture_fp, " closed\n");
+		fclose(_capture_fp);
+		_capture_fp = NULL;
+	}
+	if (_peer_addr != NULL) {
+		free(_peer_addr);
+		_peer_addr = NULL;
+	}
+}
+
+static void capture_data(const void *buf, size_t size, int in)
+{
+	if (_capture_fp != NULL) {
+		capture_newline(in);
+		fprintf(_capture_fp, " (%d) ", (int) size);
+		fwrite(buf, size, 1, _capture_fp);
+		fprintf(_capture_fp, "\n");
+	}
+}
 
 static void copyloop(int insock, int outsock, int timeout_secs)
 {
@@ -581,6 +646,9 @@ static void copyloop(int insock, int outsock, int timeout_secs)
 	ssize_t bytes_out = 0;
 	unsigned int start_time, end_time;
 	char *buf;
+
+	if (capture_file != NULL)
+		capture_open(insock);
 
 	/* Record start time */
 	start_time = (unsigned int)time(NULL);
@@ -621,6 +689,7 @@ static void copyloop(int insock, int outsock, int timeout_secs)
 
 			/* Make sure to terminate buffer before passing it to ftp_clean() */
 			buf[bytes] = 0;
+			capture_data(buf, bytes, REDIR_IN);
 
 #ifndef NO_FTP
 			if (ftp & FTP_PORT)
@@ -642,6 +711,7 @@ static void copyloop(int insock, int outsock, int timeout_secs)
 
 			/* Make sure to terminate buffer before passing it to ftp_clean() */
 			buf[bytes] = 0;
+			capture_data(buf, bytes, REDIR_OUT);
 
 #ifndef NO_FTP
 			/* if we're correcting for PASV on ftp redirections, then
@@ -658,6 +728,7 @@ static void copyloop(int insock, int outsock, int timeout_secs)
 	}
 	free(buf);
 no_mem:
+	capture_close();
 	shutdown(insock, SHUT_RDWR);
 	shutdown(outsock, SHUT_RDWR);
 	close(insock);
