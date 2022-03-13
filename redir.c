@@ -610,6 +610,7 @@ static void capture_open(int insock)
 	} else {
 		capture_newline(REDIR_IN);
 		fprintf(_capture_fp, " opened\n");
+		fflush(_capture_fp);
 	}
 }
 
@@ -634,6 +635,7 @@ static void capture_data(const void *buf, size_t size, int in)
 		fprintf(_capture_fp, " (%d) ", (int) size);
 		fwrite(buf, size, 1, _capture_fp);
 		fprintf(_capture_fp, "\n");
+		fflush(_capture_fp);
 	}
 }
 
